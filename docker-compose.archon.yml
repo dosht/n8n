@@ -1,0 +1,160 @@
+# ============================================================================
+# ARCHON SSL DEPLOYMENT WITH NGINX & CERTBOT
+# Based on n8n deployment pattern
+# ============================================================================
+
+services:
+  # =========================================================================
+  # ARCHON BACKEND SERVICES
+  # =========================================================================
+  
+  archon-server:
+    image: coleam00/archon-server:latest
+    container_name: archon-server
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
+      - SERVICE_DISCOVERY_MODE=docker_compose
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
+      - ARCHON_MCP_PORT=${ARCHON_MCP_PORT:-8051}
+      - ARCHON_AGENTS_PORT=${ARCHON_AGENTS_PORT:-8052}
+      - HOST=archon-server
+    volumes:
+      - archon_data:/app/data
+      - archon_cache:/app/.cache
+    networks:
+      - archon_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${ARCHON_SERVER_PORT:-8181}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  archon-mcp:
+    image: coleam00/archon-mcp:latest
+    container_name: archon-mcp
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
+      - SERVICE_DISCOVERY_MODE=docker_compose
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ARCHON_MCP_PORT=${ARCHON_MCP_PORT:-8051}
+      - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
+      - HOST=archon-mcp
+    depends_on:
+      archon-server:
+        condition: service_healthy
+    networks:
+      - archon_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${ARCHON_MCP_PORT:-8051}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  archon-agents:
+    image: coleam00/archon-agents:latest
+    container_name: archon-agents
+    restart: unless-stopped
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
+      - SERVICE_DISCOVERY_MODE=docker_compose
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ARCHON_AGENTS_PORT=${ARCHON_AGENTS_PORT:-8052}
+      - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
+      - HOST=archon-agents
+    depends_on:
+      archon-server:
+        condition: service_healthy
+    networks:
+      - archon_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${ARCHON_AGENTS_PORT:-8052}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  archon-frontend:
+    image: coleam00/archon-frontend:latest
+    container_name: archon-frontend
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=https://${ARCHON_API_DOMAIN}
+      - VITE_ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
+      - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
+      - NODE_ENV=${NODE_ENV:-production}
+    depends_on:
+      archon-server:
+        condition: service_healthy
+    networks:
+      - archon_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3737/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # =========================================================================
+  # REVERSE PROXY & SSL
+  # =========================================================================
+
+  nginx:
+    image: nginx:alpine
+    container_name: archon_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/logs:/var/log/nginx
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    depends_on:
+      - archon-server
+      - archon-frontend
+    networks:
+      - archon_network
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: archon_certbot
+    restart: "no"
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+# =========================================================================
+# VOLUMES & NETWORKS
+# =========================================================================
+
+volumes:
+  archon_data:
+    driver: local
+  archon_cache:
+    driver: local
+
+networks:
+  archon_network:
+    driver: bridge
+    name: archon_network
